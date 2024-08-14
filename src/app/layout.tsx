@@ -10,7 +10,7 @@ export const metadata: Metadata = {
   title: "Groei",
   description: "Generate your own Podcasts",
   icons: {
-    icon: "icons/logo.svg",
+    icon: "icons/Logo.jpeg",
   },
 };
 

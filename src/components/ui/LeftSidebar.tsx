@@ -19,7 +19,7 @@ const LeftSidebar = () => {
           href="/"
           className="flex items-center pb-10 max-lg:justify-center cursor-pointer gap-1 "
         >
-          <Image src="/icons/logo.svg" alt="logo" width={23} height={23} />
+          <Image src="/icons/Logo.jpeg" alt="logo" width={23} height={23} />
           <h1 className="text-24 font-extrabold text-white max:lg:hidden">
             Groei
           </h1>
