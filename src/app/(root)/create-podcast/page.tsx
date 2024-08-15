@@ -27,6 +27,7 @@ import GeneratePodcast from "@/components/ui/GeneratePodcast";
 import GenerateThumbnail from "@/components/ui/GenerateThumbnail";
 import { Loader } from "lucide-react";
 import { Id } from "../../../../convex/_generated/dataModel";
+import { Textarea } from "@/components/ui/textarea";
 
 const voiceCategories = ["alloy", "shimmer", "nova", "echo", "fable", "onyx"];
 
@@ -44,7 +45,7 @@ const CreatePodcast = () => {
   const [audioUrl, setAudioUrl] = useState("");
   const [audioDuration, setAudioDuration] = useState(0);
   
-  const [voiceType, setVoiceType] = useState<string | null>(null);
+  const [voiceType, setVoiceType] = useState< string | null >(null);
   const [voicePrompt, setVoicePrompt] = useState("");
   
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -80,11 +81,11 @@ const CreatePodcast = () => {
               render={({ field }) => (
                 <FormItem className="flex flex-col gap-2.5">
                   <FormLabel className="text-16 font-bold text-white-1">
-                    Username
+                    Title
                   </FormLabel>
                   <FormControl>
                     <Input
-                      className="input-class focus-visible:ring-violet-700"
+                      className="input-class focus-visible:ring-offset-violet-300"
                       placeholder="Podcast on Groei"
                       {...field}
                     />
@@ -102,7 +103,7 @@ const CreatePodcast = () => {
               <Select onValueChange={(value) => setVoiceType(value)}>
                 <SelectTrigger
                   className={cn(
-                    "text-16 w-full border-none bg-black-1 text-gray-1"
+                    "text-16 w-full border-none bg-black-1 text-gray-1 focus-visible:ring-offset-violet-300"
                   )}
                 >
                   <SelectValue
@@ -110,7 +111,7 @@ const CreatePodcast = () => {
                     className="placeholder:text-gray-1"
                   />
                 </SelectTrigger>
-                <SelectContent className="text-16 border-none bg-black-1 font-bold text-white-1 focus:ring-violet-700">
+                <SelectContent className="text-16 border-none bg-black-1 font-bold text-white-1 focus:ring-offset-violet-300 ">
                   {voiceCategories.map((category) => (
                     <SelectItem
                       key={category}
@@ -140,8 +141,8 @@ const CreatePodcast = () => {
                     Description
                   </FormLabel>
                   <FormControl>
-                    <textarea
-                      className="input-class focus-visible:ring-violet-700"
+                    <Textarea
+                      className="input-class focus-visible:ring-offset-violet-300"
                       placeholder="Write a short podcast description"
                       {...field}
                     />
