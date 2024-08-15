@@ -16,7 +16,7 @@ export default function RootLayout({
           <div className="mx-auto w-full max-w-5xl flex-col max-sm:px-4">
             <div className="flex h-16 items-center justify-between md:hidden">
               <Image
-                src="/icons/logo.svg"
+                src="/icons/logo.jpeg"
                 width={30}
                 height={30}
                 alt="menu icon"
