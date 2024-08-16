@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 
 import { Button } from "@/components/ui/button";
+
 import {
   Form,
   FormControl,
@@ -45,7 +46,7 @@ const CreatePodcast = () => {
   const [audioUrl, setAudioUrl] = useState("");
   const [audioDuration, setAudioDuration] = useState(0);
   
-  const [voiceType, setVoiceType] = useState< string | null >(null);
+  const [voiceType, setVoiceType] = useState < string | null >(null);
   const [voicePrompt, setVoicePrompt] = useState("");
   
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -124,7 +125,7 @@ const CreatePodcast = () => {
                 </SelectContent>
                 {voiceType && (
                   <audio
-                    src="{`/$voiceType}.mp3`}"
+                    src={`/${voiceType}.mp3`}
                     autoPlay
                     className="hidden"
                   />
@@ -157,7 +158,7 @@ const CreatePodcast = () => {
             <GeneratePodcast 
             setAudioStorageId={setAudioStorageId}
             setAudio={setAudioUrl}
-            voiceType={voiceType}
+            voiceType={voiceType! }
             audio={audioUrl}
             voicePrompt={voicePrompt}
             setVoicePrompt={setVoicePrompt}
