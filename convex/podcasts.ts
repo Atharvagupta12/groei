@@ -6,7 +6,7 @@ export const getUrl = mutation({
 storageId: v.id("_storage"),
 
     },
-    handler: async (ctx, args0) => {
+    handler: async (ctx, args) => {
         return await ctx.storage.getUrl(args.storageId)
     }
 })
