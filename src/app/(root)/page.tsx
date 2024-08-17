@@ -26,7 +26,7 @@ const Home = () => {
               title={title}
               description={description}
               podcastId={id}
-            />
+            /> 
           ))}
         </div>
       </section>

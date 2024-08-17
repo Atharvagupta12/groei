@@ -1,0 +1,1 @@
+curl https://api.openai.com/v1/audio/speech -H "Authorization: Bearer sk-svcacct-6xMxC-sBKmxyq5gjszDo97p9WnjZmf7oPeeRZREteErtDuAq0AWzOiOMdtsgZzNN6ykT3lbkFJhhj-VtbC6qq6igh55obMeiEABkVlJwwi1cN6HVbSqDa5nBalq_J_Nwk_3VgHQNSFBAA" -H "Content-Type: application/json" -d '{"model": "tts-1","input": "The quick brown fox jumped over the lazy dog.","voice": "alloy"}' --output speech.mp3
