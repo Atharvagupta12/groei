@@ -1,12 +1,16 @@
+import type { Metadata } from "next";
 import { SignIn } from "@clerk/nextjs";
-import React from "react";
 
-const Page = () => {
+import AuthHeading from "@/components/auth/AuthHeading";
+import { authFormAppearance } from "@/components/auth/authAppearance";
+
+export const metadata: Metadata = { title: "Sign in" };
+
+export default function SignInPage() {
   return (
-    <div className="flex-center glassmorphism-auth h-screen w-full">
-      <SignIn />
-    </div>
+    <>
+      <AuthHeading title="Welcome back 👋" subtitle="Sign in to keep creating and listening." />
+      <SignIn appearance={authFormAppearance} signUpUrl="/sign-up" fallbackRedirectUrl="/" />
+    </>
   );
-};
-
-export default Page;
+}

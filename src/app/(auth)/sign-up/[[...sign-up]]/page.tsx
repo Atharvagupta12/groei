@@ -1,12 +1,19 @@
+import type { Metadata } from "next";
 import { SignUp } from "@clerk/nextjs";
-import React from "react";
 
-const Page = () => {
+import AuthHeading from "@/components/auth/AuthHeading";
+import { authFormAppearance } from "@/components/auth/authAppearance";
+
+export const metadata: Metadata = { title: "Create your account" };
+
+export default function SignUpPage() {
   return (
-    <div className="flex-center glassmorphism-auth h-screen w-full">
-      <SignUp />
-    </div>
+    <>
+      <AuthHeading
+        title="Create your account"
+        subtitle="Start making AI podcasts for free. It takes 30 seconds."
+      />
+      <SignUp appearance={authFormAppearance} signInUrl="/sign-in" fallbackRedirectUrl="/create-podcast" />
+    </>
   );
-};
-
-export default Page;
+}
