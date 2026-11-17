@@ -5,36 +5,50 @@ import { Webhook } from "svix";
 import { internal } from "./_generated/api";
 import { httpAction } from "./_generated/server";
 
+type ClerkUserData = {
+  id: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  username?: string | null;
+  image_url?: string;
+  email_addresses?: { id: string; email_address: string }[];
+  primary_email_address_id?: string | null;
+};
+
+function profileFrom(data: ClerkUserData) {
+  const email =
+    data.email_addresses?.find((e) => e.id === data.primary_email_address_id)?.email_address ??
+    data.email_addresses?.[0]?.email_address ??
+    "";
+  const name =
+    [data.first_name, data.last_name].filter(Boolean).join(" ").trim() ||
+    data.username ||
+    email.split("@")[0] ||
+    "Groei creator";
+  return { clerkId: data.id, email, name, imageUrl: data.image_url ?? "" };
+}
+
 const handleClerkWebhook = httpAction(async (ctx, request) => {
   const event = await validateRequest(request);
   if (!event) {
-    return new Response("Invalid request", { status: 400 });
+    return new Response("Invalid webhook signature", { status: 400 });
   }
+
   switch (event.type) {
     case "user.created":
-      await ctx.runMutation(internal.users.createUser, {
-        clerkId: event.data.id,
-        email: event.data.email_addresses[0].email_address,
-        imageUrl: event.data.image_url,
-        name: event.data.first_name!,
-      });
-      break;
     case "user.updated":
-      await ctx.runMutation(internal.users.updateUser, {
-        clerkId: event.data.id,
-        imageUrl: event.data.image_url,
-        email: event.data.email_addresses[0].email_address,
-      });
+      await ctx.runMutation(
+        internal.users.upsertFromClerk,
+        profileFrom(event.data as unknown as ClerkUserData)
+      );
       break;
     case "user.deleted":
-      await ctx.runMutation(internal.users.deleteUser, {
-        clerkId: event.data.id as string,
-      });
+      if (event.data.id) {
+        await ctx.runMutation(internal.users.deleteFromClerk, { clerkId: event.data.id });
+      }
       break;
   }
-  return new Response(null, {
-    status: 200,
-  });
+  return new Response(null, { status: 200 });
 });
 
 const http = httpRouter();
@@ -45,24 +59,24 @@ http.route({
   handler: handleClerkWebhook,
 });
 
-const validateRequest = async (
-  req: Request
-): Promise<WebhookEvent | undefined> => {
-  // TODO: UPDATE CLERK_WEBHOOK_SECRET
-  const webhookSecret = process.env.CLERK_WEBHOOK_SECRET!;
+async function validateRequest(req: Request): Promise<WebhookEvent | null> {
+  const webhookSecret = process.env.CLERK_WEBHOOK_SECRET;
   if (!webhookSecret) {
-    throw new Error("CLERK_WEBHOOK_SECRET is not defined");
+    console.error("CLERK_WEBHOOK_SECRET is not set in the Convex environment");
+    return null;
   }
-  const payloadString = await req.text();
-  const headerPayload = req.headers;
-  const svixHeaders = {
-    "svix-id": headerPayload.get("svix-id")!,
-    "svix-timestamp": headerPayload.get("svix-timestamp")!,
-    "svix-signature": headerPayload.get("svix-signature")!,
+  const payload = await req.text();
+  const headers = {
+    "svix-id": req.headers.get("svix-id") ?? "",
+    "svix-timestamp": req.headers.get("svix-timestamp") ?? "",
+    "svix-signature": req.headers.get("svix-signature") ?? "",
   };
-  const wh = new Webhook(webhookSecret);
-  const event = wh.verify(payloadString, svixHeaders);
-  return event as unknown as WebhookEvent;
-};
+  try {
+    return new Webhook(webhookSecret).verify(payload, headers) as unknown as WebhookEvent;
+  } catch (error) {
+    console.error("Clerk webhook verification failed", error);
+    return null;
+  }
+}
 
 export default http;

@@ -1,56 +1,106 @@
-import { ConvexError, v } from "convex/values";
+import { v } from "convex/values";
 
-import { internalMutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
+import type { Doc } from "./_generated/dataModel";
+import { displayNameFrom, getUserByClerkId, requireIdentity } from "./lib/auth";
+import { deletePodcastCascade, deleteUserActivity, syncAuthorOnPodcasts } from "./lib/cleanup";
 
-export const getUserById = query({
-  args: {
-     clerkId: v.string(),
-     },
-  handler: async (ctx, args) => {
-    const user = await ctx.db
-      .query("users")
-      .filter((q) => q.eq(q.field("clerkId"), args.clerkId))
-      .unique();
+/** Fields that are safe to show publicly. Emails are never returned. */
+const toPublicUser = (user: Doc<"users">) => ({
+  _id: user._id,
+  clerkId: user.clerkId,
+  name: user.name,
+  imageUrl: user.imageUrl,
+});
 
-    if (!user) {
-      throw new ConvexError("User not found");
+/**
+ * Called by the client after sign-in. Creates the user record if needed and
+ * keeps the name and avatar in sync with Clerk, without relying on the webhook.
+ */
+export const store = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await requireIdentity(ctx);
+    const name = displayNameFrom(identity);
+    const imageUrl = identity.pictureUrl ?? "";
+    const email = identity.email ?? "";
+
+    const existing = await getUserByClerkId(ctx, identity.subject);
+    if (!existing) {
+      return await ctx.db.insert("users", {
+        clerkId: identity.subject,
+        name,
+        imageUrl,
+        email,
+      });
     }
 
-    return user;
+    const updates: Partial<Doc<"users">> = {};
+    if (identity.name && existing.name !== name) updates.name = name;
+    if (imageUrl && existing.imageUrl !== imageUrl) updates.imageUrl = imageUrl;
+    if (email && existing.email !== email) updates.email = email;
+
+    if (Object.keys(updates).length > 0) {
+      await ctx.db.patch(existing._id, updates);
+      if (updates.name || updates.imageUrl) {
+        await syncAuthorOnPodcasts(ctx, existing.clerkId, {
+          name: updates.name ?? existing.name,
+          imageUrl: updates.imageUrl ?? existing.imageUrl,
+        });
+      }
+    }
+    return existing._id;
   },
 });
 
-// this query is used to get the top user by podcast count. first the podcast is sorted by views and then the user is sorted by total podcasts, so the user with the most podcasts will be at the top.
+/** Public profile by Clerk id. Returns null (instead of throwing) when the user does not exist. */
+export const getUserById = query({
+  args: { clerkId: v.string() },
+  handler: async (ctx, args) => {
+    const user = await getUserByClerkId(ctx, args.clerkId);
+    return user ? toPublicUser(user) : null;
+  },
+});
+
+/** Creators ranked by podcast count, with their latest podcast for the "Fans like you" carousel. */
 export const getTopUserByPodcastCount = query({
   args: {},
-  handler: async (ctx, args) => {
-    const user = await ctx.db.query("users").collect();
+  handler: async (ctx) => {
+    const users = await ctx.db.query("users").take(200);
 
-    const userData = await Promise.all(
-      user.map(async (u) => {
+    const ranked = await Promise.all(
+      users.map(async (user) => {
         const podcasts = await ctx.db
           .query("podcasts")
-          .filter((q) => q.eq(q.field("authorId"), u.clerkId))
+          .withIndex("by_authorId", (q) => q.eq("authorId", user.clerkId))
+          .order("desc")
           .collect();
-
-        const sortedPodcasts = podcasts.sort((a, b) => b.views - a.views);
-
+        const latest = podcasts[0];
         return {
-          ...u,
+          ...toPublicUser(user),
           totalPodcasts: podcasts.length,
-          podcast: sortedPodcasts.map((p) => ({
-            podcastTitle: p.podcastTitle,
-            podcastId: p._id,
-          })),
+          totalViews: podcasts.reduce((sum, p) => sum + p.views, 0),
+          latestPodcast: latest
+            ? {
+                podcastId: latest._id,
+                podcastTitle: latest.podcastTitle,
+                imageUrl: latest.imageUrl,
+              }
+            : null,
         };
       })
     );
 
-    return userData.sort((a, b) => b.totalPodcasts - a.totalPodcasts);
+    return ranked
+      .filter((user) => user.totalPodcasts > 0)
+      .sort((a, b) => b.totalPodcasts - a.totalPodcasts || b.totalViews - a.totalViews)
+      .slice(0, 10);
   },
 });
 
-export const createUser = internalMutation({
+// ---------- Clerk webhook handlers (internal only) ----------
+
+export const upsertFromClerk = internalMutation({
   args: {
     clerkId: v.string(),
     email: v.string(),
@@ -58,63 +108,36 @@ export const createUser = internalMutation({
     name: v.string(),
   },
   handler: async (ctx, args) => {
-    await ctx.db.insert("users", {
-      clerkId: args.clerkId,
+    const existing = await getUserByClerkId(ctx, args.clerkId);
+    if (!existing) {
+      await ctx.db.insert("users", args);
+      return;
+    }
+    await ctx.db.patch(existing._id, {
       email: args.email,
       imageUrl: args.imageUrl,
       name: args.name,
     });
-  },
-});
-
-export const updateUser = internalMutation({
-  args: {
-    clerkId: v.string(),
-    imageUrl: v.string(),
-    email: v.string(),
-  },
-  async handler(ctx, args) {
-    const user = await ctx.db
-      .query("users")
-      .filter((q) => q.eq(q.field("clerkId"), args.clerkId))
-      .unique();
-
-    if (!user) {
-      throw new ConvexError("User not found");
-    }
-
-    await ctx.db.patch(user._id, {
+    await syncAuthorOnPodcasts(ctx, args.clerkId, {
+      name: args.name,
       imageUrl: args.imageUrl,
-      email: args.email,
     });
-
-    const podcast = await ctx.db
-      .query("podcasts")
-      .filter((q) => q.eq(q.field("authorId"), args.clerkId))
-      .collect();
-
-    await Promise.all(
-      podcast.map(async (p) => {
-        await ctx.db.patch(p._id, {
-          authorImageUrl: args.imageUrl,
-        });
-      })
-    );
   },
 });
 
-export const deleteUser = internalMutation({
+export const deleteFromClerk = internalMutation({
   args: { clerkId: v.string() },
-  async handler(ctx, args) {
-    const user = await ctx.db
-      .query("users")
-      .filter((q) => q.eq(q.field("clerkId"), args.clerkId))
-      .unique();
-
-    if (!user) {
-      throw new ConvexError("User not found");
+  handler: async (ctx, args) => {
+    const podcasts = await ctx.db
+      .query("podcasts")
+      .withIndex("by_authorId", (q) => q.eq("authorId", args.clerkId))
+      .collect();
+    for (const podcast of podcasts) {
+      await deletePodcastCascade(ctx, podcast);
     }
+    await deleteUserActivity(ctx, args.clerkId);
 
-    await ctx.db.delete(user._id);
+    const user = await getUserByClerkId(ctx, args.clerkId);
+    if (user) await ctx.db.delete(user._id);
   },
 });

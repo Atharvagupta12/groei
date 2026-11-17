@@ -1,199 +1,263 @@
 import { ConvexError, v } from "convex/values";
+import { paginationOptsValidator } from "convex/server";
 
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type MutationCtx } from "./_generated/server";
+import type { Doc, Id } from "./_generated/dataModel";
+import { getOrCreateCurrentUser, requireIdentity } from "./lib/auth";
+import { deletePodcastCascade } from "./lib/cleanup";
+import { getVoice, LIMITS } from "./lib/voices";
 
-// create podcast mutation
+// ---------- helpers ----------
+
+function cleanText(value: string, field: string, min: number, max: number) {
+  const trimmed = value.trim();
+  if (trimmed.length < min) throw new ConvexError(`${field} must be at least ${min} characters.`);
+  if (trimmed.length > max) throw new ConvexError(`${field} must be at most ${max} characters.`);
+  return trimmed;
+}
+
+/** Checks that the signed-in user owns an unattached file of the right kind. */
+async function claimFile(
+  ctx: MutationCtx,
+  storageId: Id<"_storage">,
+  ownerId: string,
+  kind: "audio" | "image"
+) {
+  const record = await ctx.db
+    .query("files")
+    .withIndex("by_storageId", (q) => q.eq("storageId", storageId))
+    .unique();
+  if (!record || record.ownerId !== ownerId || record.kind !== kind) {
+    throw new ConvexError(`The ${kind} file is invalid. Please generate it again.`);
+  }
+  if (record.podcastId) {
+    throw new ConvexError(`This ${kind} is already used by another podcast.`);
+  }
+  const url = await ctx.storage.getUrl(storageId);
+  if (!url) throw new ConvexError(`The ${kind} file has expired. Please generate it again.`);
+  return { record, url };
+}
+
+async function getOwnedPodcast(ctx: MutationCtx, podcastId: Id<"podcasts">) {
+  const identity = await requireIdentity(ctx);
+  const podcast = await ctx.db.get(podcastId);
+  if (!podcast) throw new ConvexError("Podcast not found.");
+  if (podcast.authorId !== identity.subject) {
+    throw new ConvexError("You can only change your own podcasts.");
+  }
+  return podcast;
+}
+
+// ---------- mutations ----------
+
 export const createPodcast = mutation({
   args: {
-    audioStorageId: v.id("_storage"),
     podcastTitle: v.string(),
     podcastDescription: v.string(),
-    audioUrl: v.string(),
-    imageUrl: v.string(),
-    imageStorageId: v.id("_storage"),
-    voicePrompt: v.string(),
-    imagePrompt: v.string(),
     voiceType: v.string(),
-    views: v.number(),
+    voicePrompt: v.string(),
+    imagePrompt: v.optional(v.string()),
+    audioStorageId: v.id("_storage"),
+    imageStorageId: v.id("_storage"),
     audioDuration: v.number(),
   },
   handler: async (ctx, args) => {
-    const identity = await ctx.auth.getUserIdentity();
+    const user = await getOrCreateCurrentUser(ctx);
 
-    if (!identity) {
-      throw new ConvexError("User not authenticated");
-    }
-
-    const user = await ctx.db
-      .query("users")
-      .filter((q) => q.eq(q.field("email"), identity.email))
-      .collect();
-
-    if (user.length === 0) {
-      throw new ConvexError("User not found");
-    }
-
-    const podcast = await ctx.db.insert('podcasts', {
-  ...args,
-  user: user[0]._id,
-  author: user[0].name,
-  authorId: user[0].clerkId,
-  authorImageUrl: user[0].imageUrl,
-})
-
-return podcast;
-}
-});
-
-// this mutation is required to generate the url after uploading the file to the storage.
-export const getUrl = mutation({
-  args: {
-    storageId: v.id("_storage"),
-  },
-  handler: async (ctx, args) => {
-    return await ctx.storage.getUrl(args.storageId);
-  },
-});
-
-// this query will get all the podcasts based on the voiceType of the podcast , which we are showing in the Similar Podcasts section.
-export const getPodcastByVoiceType = query({
-  args: {
-    podcastId: v.id("podcasts"),
-  },
-  handler: async (ctx, args) => {
-    const podcast = await ctx.db.get(args.podcastId);
-
-    return await ctx.db
-      .query("podcasts")
-      .filter((q) =>
-        q.and(
-          q.eq(q.field("voiceType"), podcast?.voiceType),
-          q.neq(q.field("_id"), args.podcastId)
-        )
-      )
-      .collect();
-  },
-});
-
-// this query will get all the podcasts.
-export const getAllPodcasts = query({
-  handler: async (ctx) => {
-    return await ctx.db.query("podcasts").order("desc").collect();
-  },
-});
-
-// this query will get the podcast by the podcastId.
-export const getPodcastById = query({
-  args: {
-    podcastId: v.id("podcasts"),
-  },
-  handler: async (ctx, args) => {
-    return await ctx.db.get(args.podcastId);
-  },
-});
-
-// this query will get the podcasts based on the views of the podcast , which we are showing in the Trending Podcasts section.
-export const getTrendingPodcasts = query({
-  handler: async (ctx) => {
-    const podcasts = await ctx.db.query("podcasts").collect();
-
-    return podcasts;
-  },
-});
-
-// this query will get the podcast by the authorId.
-export const getPodcastByAuthorId = query({
-  args: {
-    authorId: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const podcasts = await ctx.db
-      .query("podcasts")
-      .filter((q) => q.eq(q.field("authorId"), args.authorId))
-      .collect();
-
-    const totalListeners = podcasts.reduce(
-      (sum, podcast) => sum + podcast.views,
-      0
+    if (!getVoice(args.voiceType)) throw new ConvexError("Unknown voice.");
+    const podcastTitle = cleanText(args.podcastTitle, "Title", 2, LIMITS.titleMax);
+    const podcastDescription = cleanText(
+      args.podcastDescription,
+      "Description",
+      10,
+      LIMITS.descriptionMax
     );
+    const voicePrompt = cleanText(args.voicePrompt, "Script", 1, LIMITS.scriptMaxChars);
 
-    return { podcasts, listeners: totalListeners };
+    const audio = await claimFile(ctx, args.audioStorageId, user.clerkId, "audio");
+    const image = await claimFile(ctx, args.imageStorageId, user.clerkId, "image");
+
+    const podcastId = await ctx.db.insert("podcasts", {
+      user: user._id,
+      authorId: user.clerkId,
+      author: user.name,
+      authorImageUrl: user.imageUrl,
+      podcastTitle,
+      podcastDescription,
+      voiceType: args.voiceType,
+      voicePrompt,
+      imagePrompt: args.imagePrompt?.trim() || undefined,
+      audioStorageId: args.audioStorageId,
+      audioUrl: audio.url,
+      audioDuration: Math.max(0, args.audioDuration),
+      imageStorageId: args.imageStorageId,
+      imageUrl: image.url,
+      views: 0,
+    });
+
+    await ctx.db.patch(audio.record._id, { podcastId });
+    await ctx.db.patch(image.record._id, { podcastId });
+    return podcastId;
   },
 });
 
-// this query will get the podcast by the search query.
-export const getPodcastBySearch = query({
-  args: {
-    search: v.string(),
-  },
-  handler: async (ctx, args) => {
-    if (args.search === "") {
-      return await ctx.db.query("podcasts").order("desc").collect();
-    }
-
-    const authorSearch = await ctx.db
-      .query("podcasts")
-      .withSearchIndex("search_author", (q) => q.search("author", args.search))
-      .take(10);
-
-    if (authorSearch.length > 0) {
-      return authorSearch;
-    }
-
-    const titleSearch = await ctx.db
-      .query("podcasts")
-      .withSearchIndex("search_title", (q) =>
-        q.search("podcastTitle", args.search)
-      )
-      .take(10);
-
-    if (titleSearch.length > 0) {
-      return titleSearch;
-    }
-
-    return await ctx.db
-      .query("podcasts")
-      .withSearchIndex("search_body", (q) =>
-        q.search("podcastDescription" || "podcastTitle", args.search)
-      )
-      .take(10);
-  },
-});
-
-// this mutation will update the views of the podcast.
-export const updatePodcastViews = mutation({
+export const updatePodcast = mutation({
   args: {
     podcastId: v.id("podcasts"),
+    podcastTitle: v.string(),
+    podcastDescription: v.string(),
   },
   handler: async (ctx, args) => {
-    const podcast = await ctx.db.get(args.podcastId);
-
-    if (!podcast) {
-      throw new ConvexError("Podcast not found");
-    }
-
-    return await ctx.db.patch(args.podcastId, {
-      views: podcast.views + 1,
+    await getOwnedPodcast(ctx, args.podcastId);
+    await ctx.db.patch(args.podcastId, {
+      podcastTitle: cleanText(args.podcastTitle, "Title", 2, LIMITS.titleMax),
+      podcastDescription: cleanText(
+        args.podcastDescription,
+        "Description",
+        10,
+        LIMITS.descriptionMax
+      ),
     });
   },
 });
 
-// this mutation will delete the podcast.
 export const deletePodcast = mutation({
+  args: { podcastId: v.id("podcasts") },
+  handler: async (ctx, args) => {
+    const podcast = await getOwnedPodcast(ctx, args.podcastId);
+    await deletePodcastCascade(ctx, podcast);
+  },
+});
+
+/** Counts a listen. The client calls this at most once per podcast per browser session. */
+export const updatePodcastViews = mutation({
+  args: { podcastId: v.string() },
+  handler: async (ctx, args) => {
+    const id = ctx.db.normalizeId("podcasts", args.podcastId);
+    if (!id) return;
+    const podcast = await ctx.db.get(id);
+    if (!podcast) return;
+    await ctx.db.patch(id, { views: podcast.views + 1 });
+  },
+});
+
+// ---------- queries ----------
+
+/** Accepts any string from the URL and returns null (never throws) when it is not a valid podcast id. */
+export const getPodcastById = query({
+  args: { podcastId: v.string() },
+  handler: async (ctx, args) => {
+    const id = ctx.db.normalizeId("podcasts", args.podcastId);
+    return id ? await ctx.db.get(id) : null;
+  },
+});
+
+export const getTrendingPodcasts = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("podcasts")
+      .withIndex("by_views")
+      .order("desc")
+      .take(Math.min(args.limit ?? 8, 50));
+  },
+});
+
+export const getLatestPodcasts = query({
+  args: { limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    return await ctx.db.query("podcasts").order("desc").take(Math.min(args.limit ?? 8, 50));
+  },
+});
+
+export const listPodcasts = query({
   args: {
-    podcastId: v.id("podcasts"),
-    imageStorageId: v.id("_storage"),
-    audioStorageId: v.id("_storage"),
+    paginationOpts: paginationOptsValidator,
+    sort: v.optional(v.union(v.literal("latest"), v.literal("popular"))),
   },
   handler: async (ctx, args) => {
-    const podcast = await ctx.db.get(args.podcastId);
+    if (args.sort === "popular") {
+      return await ctx.db
+        .query("podcasts")
+        .withIndex("by_views")
+        .order("desc")
+        .paginate(args.paginationOpts);
+    }
+    return await ctx.db.query("podcasts").order("desc").paginate(args.paginationOpts);
+  },
+});
 
-    if (!podcast) {
-      throw new ConvexError("Podcast not found");
+/** "Similar podcasts" means podcasts with the same voice, falling back to popular ones. */
+export const getPodcastByVoiceType = query({
+  args: { podcastId: v.string() },
+  handler: async (ctx, args) => {
+    const id = ctx.db.normalizeId("podcasts", args.podcastId);
+    const podcast = id ? await ctx.db.get(id) : null;
+    if (!podcast) return [];
+
+    const sameVoice = await ctx.db
+      .query("podcasts")
+      .withIndex("by_voiceType", (q) => q.eq("voiceType", podcast.voiceType))
+      .order("desc")
+      .take(9);
+    const results = sameVoice.filter((p) => p._id !== podcast._id).slice(0, 8);
+
+    if (results.length < 4) {
+      const popular = await ctx.db.query("podcasts").withIndex("by_views").order("desc").take(12);
+      for (const p of popular) {
+        if (results.length >= 8) break;
+        if (p._id !== podcast._id && !results.some((r) => r._id === p._id)) results.push(p);
+      }
+    }
+    return results;
+  },
+});
+
+export const getPodcastByAuthorId = query({
+  args: { authorId: v.string() },
+  handler: async (ctx, args) => {
+    const podcasts = await ctx.db
+      .query("podcasts")
+      .withIndex("by_authorId", (q) => q.eq("authorId", args.authorId))
+      .order("desc")
+      .collect();
+    const listeners = podcasts.reduce((sum, podcast) => sum + podcast.views, 0);
+    return { podcasts, listeners };
+  },
+});
+
+/** Full-text search across title, author and description, merged and de-duplicated. */
+export const getPodcastBySearch = query({
+  args: { search: v.string() },
+  handler: async (ctx, args) => {
+    const term = args.search.trim().slice(0, 100);
+    if (!term) {
+      return await ctx.db.query("podcasts").order("desc").take(24);
     }
 
-    await ctx.storage.delete(args.imageStorageId);
-    await ctx.storage.delete(args.audioStorageId);
-    return await ctx.db.delete(args.podcastId);
+    const [byTitle, byAuthor, byBody] = await Promise.all([
+      ctx.db
+        .query("podcasts")
+        .withSearchIndex("search_title", (q) => q.search("podcastTitle", term))
+        .take(20),
+      ctx.db
+        .query("podcasts")
+        .withSearchIndex("search_author", (q) => q.search("author", term))
+        .take(20),
+      ctx.db
+        .query("podcasts")
+        .withSearchIndex("search_body", (q) => q.search("podcastDescription", term))
+        .take(20),
+    ]);
+
+    const seen = new Set<string>();
+    const merged: Doc<"podcasts">[] = [];
+    for (const podcast of [...byTitle, ...byAuthor, ...byBody]) {
+      if (!seen.has(podcast._id)) {
+        seen.add(podcast._id);
+        merged.push(podcast);
+      }
+    }
+    return merged.slice(0, 24);
   },
-})
+});
